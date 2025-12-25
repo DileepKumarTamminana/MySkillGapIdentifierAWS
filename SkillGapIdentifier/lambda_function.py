@@ -1,0 +1,164 @@
+import json
+import boto3
+import uuid
+from datetime import datetime
+from decimal import Decimal
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource("dynamodb")
+
+employees_table = dynamodb.Table("Employees")
+roles_table = dynamodb.Table("Roles")
+courses_table = dynamodb.Table("Courses")
+history_table = dynamodb.Table("SkillGapHistory")
+
+
+# ----------------------------------------
+#  Normalize Dynamodb lists → Python list
+# ----------------------------------------
+def extract_skills(raw_list):
+    if not raw_list:
+        return []
+    skills = []
+    for item in raw_list:
+        if isinstance(item, dict) and "S" in item:
+            skills.append(item["S"])
+        elif isinstance(item, str):
+            skills.append(item)
+    return skills
+
+
+# ----------------------------------------
+#  MAIN HANDLER
+# ----------------------------------------
+def lambda_handler(event, context):
+    try:
+        # Parse Body
+        body = event.get("body")
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        employee_id = body.get("employeeId")
+        role_id = body.get("roleId")
+
+        if not employee_id or not role_id:
+            return response(400, {"message": "employeeId and roleId are required"})
+
+        # ----------------------------------------
+        # Fetch employee & role
+        # ----------------------------------------
+        emp = employees_table.get_item(Key={"employeeId": employee_id}).get("Item")
+        role = roles_table.get_item(Key={"roleId": role_id}).get("Item")
+
+        if not emp:
+            return response(404, {"message": f"Employee {employee_id} not found"})
+        if not role:
+            return response(404, {"message": f"Role {role_id} not found"})
+
+        # ----------------------------------------
+        # Skill extraction
+        # ----------------------------------------
+        employee_skills = set(extract_skills(emp.get("skills", [])))
+        required_skills = set(extract_skills(role.get("requiredSkills", [])))
+
+        total = len(required_skills) or 1
+
+        matched = sorted(list(employee_skills & required_skills))
+        missing = sorted(list(required_skills - employee_skills))
+
+        match_percent = round((len(matched) / total) * 100, 2)
+        match_percent_decimal = Decimal(str(match_percent))
+
+        # ----------------------------------------
+        # Recommendations lookup
+        # ----------------------------------------
+        recommendations = []
+        for skill in missing:
+            course_item = courses_table.get_item(Key={"skill": skill}).get("Item")
+            if course_item:
+                recommendations.append({
+                    "skill": skill,
+                    "courseName": course_item.get("courseName"),
+                    "courseLink": course_item.get("courseLink")
+                })
+
+        # ----------------------------------------
+        #  Create HISTORY entry
+        # ----------------------------------------
+        history_entry = {
+            "historyId": str(uuid.uuid4()),
+            "employeeId": employee_id,
+            "roleId": role_id,
+            "matchedSkills": matched,
+            "missingSkills": missing,
+            "matchPercent": match_percent_decimal,
+            "favorite": False,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+        history_table.put_item(Item=history_entry)
+
+        # ----------------------------------------
+        #  LIMIT HISTORY TO LATEST 5 ENTRIES
+        # ----------------------------------------
+        # Fetch all logs for employee
+        try:
+            existing = history_table.query(
+                IndexName="skillGapIndex",
+                KeyConditionExpression=Key("employeeId").eq(employee_id)
+            ).get("Items", [])
+        except Exception as err:
+            print("GSI Query failed:", err)
+            existing = []
+
+        # Sort by timestamp DESC (newest → oldest)
+        existing_sorted = sorted(existing, key=lambda x: x["timestamp"], reverse=True)
+
+        # If more than 5, delete excess logs
+        if len(existing_sorted) > 5:
+            logs_to_delete = existing_sorted[5:]  # keep first 5
+            for log in logs_to_delete:
+                try:
+                    history_table.delete_item(Key={"historyId": log["historyId"]})
+                except Exception as del_err:
+                    print("Error deleting old history:", del_err)
+
+        # ----------------------------------------
+        # FINAL RESPONSE
+        # ----------------------------------------
+        return response(200, {
+            "employeeId": employee_id,
+            "employeeName": emp.get("name"),
+            "roleId": role_id,
+            "roleName": role.get("roleName") or emp.get("currentRole"),
+
+            "employeeSkills": sorted(list(employee_skills)),
+            "requiredSkills": sorted(list(required_skills)),
+            "matchedSkills": matched,
+            "missingSkills": missing,
+
+            "matchPercent": float(match_percent),
+            "recommendedCourses": recommendations
+        })
+
+    except Exception as e:
+        print("ERROR in SkillGapIdentifier:", str(e))
+        return response(500, {
+            "message": "Internal Server Error",
+            "error": str(e)
+        })
+
+
+# ----------------------------------------
+#  Standard JSON Response Wrapper
+# ----------------------------------------
+def response(code, body):
+    return {
+        "statusCode": code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Methods": "*"
+        },
+        "body": json.dumps(body)
+    }

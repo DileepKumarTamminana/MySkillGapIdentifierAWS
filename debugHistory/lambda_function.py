@@ -1,0 +1,33 @@
+
+import boto3
+import json
+from boto3.dynamodb.conditions import Key, Attr
+
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table("SkillGapHistory")
+
+def lambda_handler(event, context):
+
+    # Try GSI first
+    try:
+        gsi_data = table.query(
+            IndexName="skillgapIndex",
+            KeyConditionExpression=Key("employeeId").eq("E001")
+        )
+        items = gsi_data.get("Items", [])
+
+        if items:
+            return {"statusCode": 200, "body": json.dumps({"source": "GSI", "items": items}, default=str)}
+
+    except Exception as e:
+        print("GSI ERROR:", e)
+
+    # Fallback scan — guaranteed to show everything
+    scan_data = table.scan(
+        FilterExpression=Attr("employeeId").eq("E001")
+    )
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"source": "SCAN", "items": scan_data.get("Items", [])}, default=str)
+    }

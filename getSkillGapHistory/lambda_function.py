@@ -1,0 +1,64 @@
+import json
+import boto3
+from boto3.dynamodb.conditions import Key
+from decimal import Decimal
+
+dynamodb = boto3.resource("dynamodb")
+history_table = dynamodb.Table("SkillGapHistory")
+
+
+def decimal_to_native(obj):
+    if isinstance(obj, list):
+        return [decimal_to_native(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: decimal_to_native(v) for k, v in obj.items()}
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return obj
+
+
+def lambda_handler(event, context):
+    try:
+        # ✅ API Gateway v2 body parsing
+        body = event.get("body")
+        if body:
+            body = json.loads(body)
+        else:
+            body = {}
+
+        employee_id = body.get("employeeId")
+
+        if not employee_id:
+            return response(400, {"message": "employeeId required"})
+
+        # ✅ Query GSI
+        result = history_table.query(
+            IndexName="skillGapIndex",
+            KeyConditionExpression=Key("employeeId").eq(employee_id),
+            ScanIndexForward=False  # newest first
+        )
+
+        items = result.get("Items", [])
+
+        if not items:
+            return response(200, [])
+
+        items = decimal_to_native(items)
+
+        return response(200, items)
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return response(500, {"error": str(e)})
+
+
+def response(code, body):
+    return {
+        "statusCode": code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Methods": "OPTIONS,POST"
+        },
+        "body": json.dumps(body)
+    }
