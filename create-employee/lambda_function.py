@@ -1,0 +1,39 @@
+import json
+import boto3
+
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table("Employees")
+
+def lambda_handler(event, context):
+    body = json.loads(event.get("body") or "{}")
+
+    employeeId = body.get("employeeId")
+    name = body.get("name")
+    currentRole = body.get("currentRole")
+    targetRoleId = body.get("targetRoleId")
+
+    if not employeeId or not name or not currentRole or not targetRoleId:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "All fields required"})
+        }
+
+    item = {
+        "employeeId": employeeId,
+        "name": name,
+        "currentRole": currentRole,
+        "targetRoleId": targetRoleId,
+        "skills": []        # Empty list
+    }
+
+    table.put_item(Item=item)
+
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Methods": "*"
+        },
+        "body": json.dumps({"message": "Employee created"})
+    }
